@@ -1,31 +1,31 @@
-# スクロールフラッグ
+# Scroll Flag
 
-シンプルな2Dランゲーム。プレイヤーは自動で右に進み、上下移動で障害物を避けながらフラッグを目指します。
+A simple 2D side-scrolling run game. The player automatically moves to the right — dodge obstacles by moving up and down to reach the flag.
 
-## 遊び方
+## How to Play
 
-- **キーボード**: ↑↓ キーで上下移動
-- **マウス**: 上下に動かして移動
-- **タッチ**: 画面上側タッチで上、下側タッチで下
+- **Keyboard**: Use the arrow keys (Up/Down) to move vertically
+- **Mouse**: Move the mouse up and down to control the player
+- **Touch**: Tap the upper half of the screen to move up, or the lower half to move down
 
-フラッグに到達するとステージクリア。障害物や後方壁に当たるとミス（残機 -1）。残機 0 でゲームオーバー。
+Reach the flag to clear the stage. Hitting an obstacle or the left wall results in a miss (lives -1). The game is over when lives reach 0.
 
-## ゲームの特徴
+## Features
 
-- ステージクリアごとに移動速度が上昇
-- ミス時は速度ペナルティ（-180 px/s、下限あり）
-- 障害物・フラッグはステージごとにランダム配置
-- ゲームオーバー時にリザルト画像をクリップボードにコピー可能
+- Scroll speed increases with each stage cleared
+- Speed penalty on miss (-180 px/s, with a minimum cap)
+- Obstacles and flags are randomly placed per stage
+- Copy a result image to the clipboard on game over
 
-## 技術スタック
+## Tech Stack
 
-- Canvas API + vanilla JavaScript（外部ライブラリなし）
-- 単一 `index.html` ファイル構成
+- Canvas API + vanilla JavaScript (no external libraries)
+- Single `index.html` file
 
-## デモ
+## Demo
 
-GitHub Pages でホスティング予定。
+To be hosted on GitHub Pages.
 
-## ライセンス
+## License
 
 MIT
