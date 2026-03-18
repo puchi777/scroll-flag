@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>スクロールフラッグ</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #111;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  overflow: hidden;
+}
+canvas {
+  display: block;
+  transform-origin: center center;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ============================================================
+// 定数
+// ============================================================
+const INITIAL_SPEED = 100;
+const SPEED_INCREMENT = 60;
+const VERTICAL_SPEED = 180;
+const FIELD_HEIGHT = 720;
+const START_X = 80;
+const PLAYER_INIT_Y = 360;
+const PLAYER_RADIUS = 12;
+const INITIAL_LIVES = 3;
+
+const FLAG_WIDTH = 24;
+const FLAG_HEIGHT = 64;
+const FLAG_X_MIN = 900;
+const FLAG_X_MAX = 1400;
+const FLAG_Y_MIN = 80;
+const FLAG_Y_MAX = FIELD_HEIGHT - 80;
+
+const WALL_OFFSET = 60;
+const WALL_WIDTH = 20;
+const WALL_HEIGHT = FIELD_HEIGHT;
+
+const OBSTACLE_COUNT = 6;
+const OBSTACLE_W = 40;
+const OBSTACLE_H = 40;
+const OBSTACLE_X_MIN = 200;
+const OBSTACLE_X_MAX = 1250;
+const OBSTACLE_Y_MIN = 40;
+const OBSTACLE_Y_MAX = FIELD_HEIGHT - 40;
+const OBSTACLE_MIN_GAP = 80;
+
+const SAFE_START_X0 = 0;
+const SAFE_START_X1 = 180;
+const SAFE_START_Y0 = 280;
+const SAFE_START_Y1 = 440;
+const SAFE_FLAG_RADIUS = 70;
+
+const PASSAGE_MIN = 100;
+
+const CLEAR_DURATION = 0.7;
+const MISS_DURATION = 0.5;
+
+const MOUSE_THRESHOLD = 16;
+const MISS_SPEED_PENALTY = 180;
+
+// ============================================================
+// Canvas セットアップ
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = FIELD_HEIGHT;
+  const scaleY = window.innerHeight / FIELD_HEIGHT;
+  const scaleX = window.innerWidth / canvas.width;
+  const scale = Math.min(scaleX, scaleY, 1);
+  canvas.style.transform = `scale(${scale})`;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ============================================================
+// ゲーム状態
+// ============================================================
+let state = 'title';
+let lives = INITIAL_LIVES;
+let stage = 1;
+let hSpeed = INITIAL_SPEED;
+let totalDistance = 0;
+let maxSpeed = INITIAL_SPEED;
+let player = { x: START_X, y: PLAYER_INIT_Y };
+let cameraX = 0;
+let transitionTimer = 0;
+
+let flag = null;
+let wall = null;
+let obstacles = [];
+
+// ============================================================
+// 入力管理
+// ============================================================
+let inputDirection = 0;
+let keysDown = {};
+let touchDirection = 0;
+let mouseLastY = null;
+let mouseAccumY = 0;
+
+window.addEventListener('keydown', (e) => {
+  keysDown[e.key] = true;
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') e.preventDefault();
+  if (state === 'title' && e.key === 'Enter') startGame();
+  if (state === 'game_over' && e.key === 'Enter') restartGame();
+});
+window.addEventListener('keyup', (e) => { keysDown[e.key] = false; });
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (state === 'title') { startGame(); return; }
+  if (state === 'game_over') { restartGame(); return; }
+  updateTouch(e);
+}, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  updateTouch(e);
+}, { passive: false });
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  touchDirection = 0;
+});
+
+function updateTouch(e) {
+  if (e.touches.length === 0) { touchDirection = 0; return; }
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches[0];
+  const relY = (t.clientY - rect.top) / rect.height;
+  touchDirection = relY < 0.5 ? -1 : 1;
+}
+
+canvas.addEventListener('mousemove', (e) => {
+  if (mouseLastY !== null) {
+    mouseAccumY += e.clientY - mouseLastY;
+  }
+  mouseLastY = e.clientY;
+});
+canvas.addEventListener('mouseleave', () => { mouseLastY = null; mouseAccumY = 0; });
+
+function getInput() {
+  // returns { dir: -1|0|1, mouseDY: number }
+  let dir = 0;
+  let mouseDY = 0;
+  // キーボード
+  if (keysDown['ArrowUp']) dir = -1;
+  if (keysDown['ArrowDown']) dir = 1;
+  // タッチ（後勝ち）
+  if (touchDirection !== 0) dir = touchDirection;
+  // マウス（蓄積した移動量をそのまま渡す）
+  if (Math.abs(mouseAccumY) >= MOUSE_THRESHOLD) {
+    mouseDY = mouseAccumY;
+  }
+  mouseAccumY = 0;
+  return { dir, mouseDY };
+}
+
+// ============================================================
+// ステージ生成
+// ============================================================
+function rand(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+function distSq(x1, y1, x2, y2) {
+  return (x1 - x2) ** 2 + (y1 - y2) ** 2;
+}
+
+function generateStage() {
+  // フラッグ位置
+  const fx = START_X + rand(FLAG_X_MIN, FLAG_X_MAX);
+  const fy = rand(FLAG_Y_MIN, FLAG_Y_MAX - FLAG_HEIGHT);
+  flag = { x: fx, y: fy, w: FLAG_WIDTH, h: FLAG_HEIGHT };
+
+  // 後方壁
+  wall = { x: fx + WALL_OFFSET, y: 0, w: WALL_WIDTH, h: WALL_HEIGHT };
+
+  // フラッグ中心
+  const flagCX = fx + FLAG_WIDTH / 2;
+  const flagCY = fy + FLAG_HEIGHT / 2;
+
+  // 障害物生成
+  obstacles = [];
+
+  // 直進ライン上に必ず1つ障害物を配置（動かないとぶつかるようにする）
+  const blockX = START_X + rand(300, Math.min(800, wall.x - START_X - OBSTACLE_W));
+  const blockY = PLAYER_INIT_Y - OBSTACLE_H / 2; // プレイヤー初期Yの中心に配置
+  obstacles.push({ x: blockX, y: blockY, w: OBSTACLE_W, h: OBSTACLE_H });
+
+  let targetCount = OBSTACLE_COUNT;
+  let failures = 0;
+
+  while (obstacles.length < targetCount) {
+    if (failures >= 100) {
+      targetCount--;
+      failures = 0;
+      if (targetCount <= 0) break;
+    }
+
+    const wallEnd = wall.x + wall.w;
+    const obstacleXMax = Math.min(OBSTACLE_X_MAX, wall.x - START_X - OBSTACLE_W);
+    if (obstacleXMax <= OBSTACLE_X_MIN) { failures++; continue; }
+    const ox = START_X + rand(OBSTACLE_X_MIN, obstacleXMax);
+    const oy = rand(OBSTACLE_Y_MIN, OBSTACLE_Y_MAX - OBSTACLE_H);
+    const oCX = ox + OBSTACLE_W / 2;
+    const oCY = oy + OBSTACLE_H / 2;
+
+    // スタート安全領域チェック
+    if (rectsOverlap(ox, oy, OBSTACLE_W, OBSTACLE_H, SAFE_START_X0, SAFE_START_Y0, SAFE_START_X1 - SAFE_START_X0, SAFE_START_Y1 - SAFE_START_Y0)) {
+      failures++;
+      continue;
+    }
+
+    // フラッグ安全領域チェック（中心間距離）
+    if (Math.sqrt(distSq(oCX, oCY, flagCX, flagCY)) < SAFE_FLAG_RADIUS) {
+      failures++;
+      continue;
+    }
+
+    // 既存障害物との最小間隔チェック
+    let tooClose = false;
+    for (const o of obstacles) {
+      const dx = Math.abs(oCX - (o.x + OBSTACLE_W / 2));
+      const dy = Math.abs(oCY - (o.y + OBSTACLE_H / 2));
+      if (dx < OBSTACLE_MIN_GAP && dy < OBSTACLE_MIN_GAP) {
+        tooClose = true;
+        break;
+      }
+    }
+    if (tooClose) { failures++; continue; }
+
+    obstacles.push({ x: ox, y: oy, w: OBSTACLE_W, h: OBSTACLE_H });
+
+    // 通路保証チェック
+    if (!checkPassage()) {
+      obstacles.pop();
+      failures++;
+      continue;
+    }
+
+    failures = 0;
+  }
+}
+
+function checkPassage() {
+  if (obstacles.length <= 1) return true;
+  // Y座標でソートし、隣接間に100px以上の隙間が1箇所以上あるか
+  const edges = [];
+  for (const o of obstacles) {
+    edges.push({ top: o.y, bottom: o.y + o.h });
+  }
+  edges.sort((a, b) => a.top - b.top);
+
+  // 上端からの隙間
+  if (edges[0].top >= PASSAGE_MIN) return true;
+  // 隣接間
+  for (let i = 0; i < edges.length - 1; i++) {
+    if (edges[i + 1].top - edges[i].bottom >= PASSAGE_MIN) return true;
+  }
+  // 下端からの隙間
+  if (FIELD_HEIGHT - edges[edges.length - 1].bottom >= PASSAGE_MIN) return true;
+
+  return false;
+}
+
+// ============================================================
+// 衝突判定（円 vs 矩形）
+// ============================================================
+function circleRectCollision(cx, cy, cr, rx, ry, rw, rh) {
+  const nearestX = Math.max(rx, Math.min(cx, rx + rw));
+  const nearestY = Math.max(ry, Math.min(cy, ry + rh));
+  const dx = cx - nearestX;
+  const dy = cy - nearestY;
+  return dx * dx + dy * dy <= cr * cr;
+}
+
+// ============================================================
+// ゲーム開始・リスタート
+// ============================================================
+function startGame() {
+  state = 'playing';
+  lives = INITIAL_LIVES;
+  stage = 1;
+  hSpeed = INITIAL_SPEED;
+  totalDistance = 0;
+  maxSpeed = INITIAL_SPEED;
+  player.x = START_X;
+  player.y = PLAYER_INIT_Y;
+  cameraX = 0;
+  generateStage();
+}
+
+function restartGame() {
+  startGame();
+}
+
+function startNewStage() {
+  player.x = START_X;
+  player.y = PLAYER_INIT_Y;
+  cameraX = 0;
+  generateStage();
+}
+
+// ============================================================
+// メインループ
+// ============================================================
+let lastTime = 0;
+
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05); // cap delta
+  lastTime = timestamp;
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(gameLoop);
+}
+
+function update(dt) {
+  // トーストタイマー
+  if (copyToast) {
+    copyToast.timer -= dt;
+    if (copyToast.timer <= 0) copyToast = null;
+  }
+
+  if (state === 'playing') {
+    // 1. 入力
+    const input = getInput();
+
+    // 2-3. プレイヤー移動
+    const dx = hSpeed * dt;
+    player.x += dx;
+    const prevY = player.y;
+    // キーボード・タッチによる移動
+    player.y += input.dir * VERTICAL_SPEED * dt;
+    // マウスによる直接移動（マウスの移動量をそのままプレイヤーに反映）
+    player.y += input.mouseDY;
+    player.y = Math.max(PLAYER_RADIUS, Math.min(FIELD_HEIGHT - PLAYER_RADIUS, player.y));
+    const dy = Math.abs(player.y - prevY);
+
+    // 4. カメラ
+    cameraX = player.x - canvas.width / 4;
+
+    // 5. 距離（横移動 + 上下移動）
+    totalDistance += dx + dy;
+
+    // 6. 最高時速
+    if (hSpeed > maxSpeed) maxSpeed = hSpeed;
+
+    // 7-8. 衝突判定
+    // フラッグ
+    if (circleRectCollision(player.x, player.y, PLAYER_RADIUS, flag.x, flag.y, flag.w, flag.h)) {
+      state = 'stage_clear';
+      transitionTimer = CLEAR_DURATION;
+      return;
+    }
+
+    // 後方壁
+    if (circleRectCollision(player.x, player.y, PLAYER_RADIUS, wall.x, wall.y, wall.w, wall.h)) {
+      handleMiss();
+      return;
+    }
+
+    // 障害物
+    for (const o of obstacles) {
+      if (circleRectCollision(player.x, player.y, PLAYER_RADIUS, o.x, o.y, o.w, o.h)) {
+        handleMiss();
+        return;
+      }
+    }
+  } else if (state === 'stage_clear') {
+    transitionTimer -= dt;
+    if (transitionTimer <= 0) {
+      stage++;
+      hSpeed += SPEED_INCREMENT;
+      if (hSpeed > maxSpeed) maxSpeed = hSpeed;
+      startNewStage();
+      state = 'playing';
+    }
+  } else if (state === 'miss') {
+    transitionTimer -= dt;
+    if (transitionTimer <= 0) {
+      if (lives > 0) {
+        hSpeed = Math.max(INITIAL_SPEED, hSpeed - MISS_SPEED_PENALTY);
+        startNewStage();
+        state = 'playing';
+      } else {
+        state = 'game_over';
+      }
+    }
+  }
+}
+
+function handleMiss() {
+  lives--;
+  state = 'miss';
+  transitionTimer = MISS_DURATION;
+}
+
+// ============================================================
+// 描画
+// ============================================================
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (state === 'title') {
+    drawTitle();
+  } else if (state === 'game_over') {
+    drawGameOver();
+  } else {
+    drawPlayField();
+    drawHUD();
+    if (state === 'stage_clear') drawOverlayText('STAGE CLEAR');
+    if (state === 'miss') drawOverlayText('MISS');
+  }
+
+  // コピー完了トースト
+  if (copyToast) {
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 24px monospace';
+    ctx.fillStyle = `rgba(100, 255, 100, ${Math.min(1, copyToast.timer * 2)})`;
+    ctx.fillText(copyToast.msg, canvas.width / 2, 660);
+  }
+}
+
+function drawTitle() {
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e0e0ff';
+  ctx.font = 'bold 64px monospace';
+  ctx.fillText('スクロールフラッグ', canvas.width / 2, 200);
+
+  ctx.font = '24px monospace';
+  ctx.fillStyle = '#aaaacc';
+  const instructions = [
+    '↑↓ キーで上下移動',
+    'マウスを上下に動かして移動',
+    '画面上側タッチで上、下側タッチで下',
+  ];
+  instructions.forEach((text, i) => {
+    ctx.fillText(text, canvas.width / 2, 320 + i * 40);
+  });
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '28px monospace';
+  const blink = Math.sin(Date.now() / 400) > 0;
+  if (blink) {
+    ctx.fillText('Press Enter / Tap to Start', canvas.width / 2, 520);
+  }
+}
+
+function drawPlayField() {
+  // 背景
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.translate(-cameraX, 0);
+
+  // 障害物
+  ctx.fillStyle = '#cc3333';
+  for (const o of obstacles) {
+    ctx.fillRect(o.x, o.y, o.w, o.h);
+  }
+
+  // 後方壁
+  ctx.fillStyle = '#555555';
+  ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+
+  // フラッグ
+  drawFlag(flag.x, flag.y, flag.w, flag.h);
+
+  // プレイヤー
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = '#4488ff';
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawFlag(x, y, w, h) {
+  // 旗竿
+  const poleX = x + 2;
+  ctx.fillStyle = '#cccccc';
+  ctx.fillRect(poleX, y, 3, h);
+
+  // 旗布（三角形っぽい形）
+  ctx.fillStyle = '#ffcc00';
+  ctx.beginPath();
+  ctx.moveTo(poleX + 3, y);
+  ctx.lineTo(poleX + 3 + w - 5, y + 16);
+  ctx.lineTo(poleX + 3, y + 32);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawHUD() {
+  const speed = Math.round(hSpeed);
+  const max = Math.round(maxSpeed);
+  const dist = Math.round(totalDistance);
+
+  ctx.textAlign = 'left';
+  ctx.font = '18px monospace';
+  ctx.fillStyle = '#ffffff';
+
+  const items = [
+    `LIFE ${lives}`,
+    `STAGE ${stage}`,
+    `SPEED ${speed} px/s`,
+    `MAX ${max} px/s`,
+    `DIST ${dist} px`,
+  ];
+
+  items.forEach((text, i) => {
+    ctx.fillText(text, 16, 28 + i * 24);
+  });
+}
+
+function drawOverlayText(text) {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 56px monospace';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, canvas.width / 2, FIELD_HEIGHT / 2);
+}
+
+function drawGameOver() {
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff4444';
+  ctx.font = 'bold 56px monospace';
+  ctx.fillText('GAME OVER', canvas.width / 2, 180);
+
+  ctx.fillStyle = '#cccccc';
+  ctx.font = '24px monospace';
+  const max = Math.round(maxSpeed);
+  const dist = Math.round(totalDistance);
+  const results = [
+    `STAGE  ${stage}`,
+    `DIST   ${dist} px`,
+    `MAX    ${max} px/s`,
+  ];
+  results.forEach((text, i) => {
+    ctx.fillText(text, canvas.width / 2, 300 + i * 44);
+  });
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '28px monospace';
+  const blink = Math.sin(Date.now() / 400) > 0;
+  if (blink) {
+    ctx.fillText('Press Enter / Tap to Restart', canvas.width / 2, 520);
+  }
+
+  // コピーボタン
+  ctx.fillStyle = '#336699';
+  const btnW = 280, btnH = 44;
+  const btnX = canvas.width / 2 - btnW / 2, btnY = 580;
+  ctx.fillRect(btnX, btnY, btnW, btnH);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '20px monospace';
+  ctx.fillText('📋 Copy Result Image', canvas.width / 2, btnY + 30);
+
+  // ボタン領域を保存（クリック判定用）
+  gameOverBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+let gameOverBtn = null;
+
+function generateResultImage() {
+  const w = 480, h = 320;
+  const oc = document.createElement('canvas');
+  oc.width = w; oc.height = h;
+  const c = oc.getContext('2d');
+
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, w, h);
+
+  c.textAlign = 'center';
+  c.fillStyle = '#ff4444';
+  c.font = 'bold 40px monospace';
+  c.fillText('GAME OVER', w / 2, 60);
+
+  c.fillStyle = '#e0e0ff';
+  c.font = 'bold 22px monospace';
+  c.fillText('スクロールフラッグ', w / 2, 100);
+
+  c.fillStyle = '#cccccc';
+  c.font = '22px monospace';
+  const max = Math.round(maxSpeed);
+  const dist = Math.round(totalDistance);
+  const lines = [
+    `STAGE  ${stage}`,
+    `DIST   ${dist} px`,
+    `MAX    ${max} px/s`,
+  ];
+  lines.forEach((text, i) => {
+    c.fillText(text, w / 2, 160 + i * 40);
+  });
+
+  c.fillStyle = '#555555';
+  c.font = '14px monospace';
+  c.fillText('#スクロールフラッグ', w / 2, 300);
+
+  return oc;
+}
+
+async function copyResultImage() {
+  const oc = generateResultImage();
+  try {
+    const blob = await new Promise(resolve => oc.toBlob(resolve, 'image/png'));
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    showCopyToast('Copied!');
+  } catch (e) {
+    // フォールバック: 画像をダウンロード
+    const a = document.createElement('a');
+    a.href = oc.toDataURL('image/png');
+    a.download = 'scroll-flag-result.png';
+    a.click();
+    showCopyToast('Downloaded!');
+  }
+}
+
+let copyToast = null;
+function showCopyToast(msg) {
+  copyToast = { msg, timer: 2.0 };
+}
+
+canvas.addEventListener('click', (e) => {
+  if (state !== 'game_over' || !gameOverBtn) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top) * scaleY;
+  const b = gameOverBtn;
+  if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+    copyResultImage();
+  }
+});
+
+// ============================================================
+// 起動
+// ============================================================
+requestAnimationFrame((t) => {
+  lastTime = t;
+  gameLoop(t);
+});
+</script>
+</body>
+</html>
